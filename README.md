@@ -1,68 +1,135 @@
-# ai-audio-transcriber
+# AI Audio Transcriber
 
-An end-to-end, multi-agent pipeline that turns raw audio input into structured qualitative insights. Upload an audio file (interview, lecture, meeting, etc.) and the pipeline will transcribe, clean, and summarize it automatically.
+An end-to-end, multi-agent pipeline that turns raw audio — interviews, lectures,
+meetings — into clean transcripts and structured, bullet-point summaries. Drop in an
+audio file and the pipeline transcribes it locally, cleans and summarizes it with a
+team of LLM agents, and exports the result to JSON, DOCX, and PDF, with optional
+translation into ten languages.
+
+Run it from the command line or through a drag-and-drop web UI.
+
+---
+
+## How it works
+
+```
+                ┌──────────────────────────────────────────────────────┐
+   audio file   │  faster-whisper (local, CPU)  ──►  raw transcript     │
+   ───────────► │                                          │            │
+                │                                          ▼            │
+                │   Coordinator agent  ◄────────►  Cleaner agent         │
+                │   (greets, gathers           (cleans, formats,        │
+                │    preferences, delegates)    summarizes)              │
+                └──────────────────────────────────────────│───────────┘
+                                                            ▼
+                              JSON · DOCX · PDF   (+ optional translation)
+```
+
+- **Local transcription.** Audio is transcribed on-device with
+  [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`base` model, int8, CPU) —
+  no audio ever leaves your machine for the speech-to-text step.
+- **Multi-agent cleaning & summarization.** A two-agent system, defined declaratively in
+  [`agents.yaml`](agents.yaml), refines the transcript:
+  - **Coordinator** — the user-facing agent. Greets, gathers preferences (focus areas,
+    number of summary bullets), retrieves the transcript, and delegates.
+  - **Cleaner** — removes filler words, fixes grammar and punctuation, strips timestamps
+    while preserving speaker labels and `[inaudible]` markers, and writes a concise
+    bullet-point summary.
+- **Shared context.** Agents read from and write to a shared context object, so
+  transcription can run in the background and block the cleaner only when its output is
+  actually needed.
+- **Optional translation.** After the transcript and summary are ready, translation runs
+  concurrently and emits a separate set of output files per target language.
+- **Multi-format export.** Every run produces `JSON`, `DOCX`, and `PDF` artifacts in
+  `output/`.
 
 ## Prerequisites
 
 - **Python 3.12+**
-- **ffmpeg** — required by the audio processing libraries (`pydub`, `faster-whisper`)
+- **ffmpeg** — required by the audio libraries (`pydub`, `faster-whisper`)
   - Linux: `sudo apt install ffmpeg`
   - macOS: `brew install ffmpeg`
   - Windows: [download from ffmpeg.org](https://ffmpeg.org/download.html)
-- **OpenAI API key** with access to the Chat/Responses API and access to the `gpt-5-mini` model
+- **OpenAI API key** with access to the models used for cleaning, summarization, and
+  translation.
 
-## Environment setup
+> This project targets a Unix-style terminal (Linux, macOS, WSL). The Dev Container
+> below is the most reliable way to run it on Windows.
 
-This project assumes a Unix-based terminal (Linux, macOS, WSL). Your mileage may vary on Windows, Powershell, or other terminals.
+## Setup
 
-Secrets are loaded from a `.env` file at the project root. Create one and add your API key:
+Secrets are loaded from a `.env` file at the project root:
 
 ```bash
 echo "OPENAI_API_KEY=your_api_key_here" >> .env
 ```
 
-## Usage
+Install dependencies:
 
-This project can be run in two modes. The first mode is a pure command line executable, while the second mode creates a web GUI. Both are explained below.
+```bash
+pip install -r requirements.txt
+```
+
+## Usage
 
 ### Command line
 
 ```bash
-python3 agent.py [-h] [-v] [-t lang_code] path/to/audio/file
+python3 agent.py [-h] [-v] [-t LANG_CODE] path/to/audio/file
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-h` | Show help and exit |
-| `-v` | Enable verbose/debug logging for each pipeline step |
-| `-t` | Translate output to a target language |
+| `-v` | Verbose/debug logging for each pipeline step |
+| `-t`  | Translate the output to a target language (see codes below) |
 
-Supported audio formats: `.mp3`, `.wav`, `.m4a`, `.flac`
+- **Supported audio formats:** `.mp3`, `.wav`, `.m4a`, `.flac`
+- **Supported translation languages:** `en`, `zh`, `fr`, `es`, `de`, `ja`, `ko`, `pt`,
+  `ar`, `ru`. Translation runs concurrently after the transcript and summary are ready
+  and writes a parallel set of output files with a language suffix (e.g. `test_es.json`).
 
-Supported translation languages: `en`, `zh`, `fr`, `es`, `de`, `ja`, `ko`, `pt`, `ar`, `ru`. Translation runs concurrently after the transcript and summary are ready, and writes a separate set of output files with a language suffix (e.g. `test_1_es.json`).
+Output files are written to `output/`.
 
-Output files (cleaned transcript, summary JSON) are written to the `output/` directory.
-
-### GUI (Gradio frontend)
+### Web UI (Gradio)
 
 ```bash
 python3 gradio_app.py
 ```
 
-This launches a web UI at **http://localhost:7860** where you can:
+Open **http://localhost:7860** to:
+
 - Upload an audio file via drag-and-drop or file picker
 - Click **Transcribe** to run the full agent pipeline
-- View the cleaned transcription and bullet-point summary as they complete
+- Watch the cleaned transcription and summary stream in as each step completes
 
-Under the hood, `gradio_app.py` spawns `agent.py` as a subprocess and communicates via a structured event protocol (`runtime_events.py`). The UI auto-replies to the coordinator agent so the pipeline runs hands-free. Logs for each run are saved to a `logs/` directory.
+Internally, `gradio_app.py` runs `agent.py` as a subprocess and communicates over a
+structured event protocol ([`runtime_events.py`](runtime_events.py)). The UI auto-replies
+to the coordinator so the pipeline runs hands-free; per-run logs are saved under `logs/`.
 
-## Installation
+## Project structure
 
-### Local (no container)
-
-```bash
-pip install -r requirements.txt
 ```
+.
+├── agent.py                 # CLI entry point + agent runtime loop
+├── gradio_app.py            # web UI; drives agent.py as a subprocess
+├── agents.yaml              # declarative definition of the coordinator + cleaner agents
+├── runtime_events.py        # event protocol bridging the UI and the pipeline
+├── config.py                # loads agent config (yaml / json / md)
+├── tools/
+│   ├── transcription.py     # local faster-whisper transcription
+│   ├── translation.py       # concurrent multi-language translation
+│   ├── exporters.py         # JSON / DOCX / PDF output
+│   ├── context.py           # shared transcript context
+│   ├── coordinator_tools.py # tools exposed to the coordinator agent
+│   ├── cleaner_tools.py     # tools exposed to the cleaner agent
+│   └── toolbox.py           # tool registry
+├── tests/                   # pytest suite
+├── audio/                   # input audio (gitignored)
+└── output/                  # generated transcripts & summaries (gitignored)
+```
+
+## Running with Docker
 
 ### Docker Compose
 
@@ -71,41 +138,40 @@ docker compose up --build
 docker compose exec app bash
 ```
 
-This builds from `Dockerfile.dev` and volume-mounts the project into the container, so local edits are reflected immediately.
+Builds from `Dockerfile.dev` and volume-mounts the project, so local edits are reflected
+immediately.
 
 ### VS Code Dev Container (recommended for development)
 
 1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/).
-2. Install the [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) extension for VS Code.
-3. Clone the repository and open the folder in VS Code.
-4. When prompted, select **Re-open in Container** in the bottom right corner (or use the command palette: `Dev Containers: Re-open in container`).
-5. The first build will take a few minutes to install everything, but subsequent starts should be fast.
-6. If dependencies change, rebuild via the command palette: `Dev Containers: Rebuild Container Without Cache`.
+2. Install the [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) extension.
+3. Open the cloned folder in VS Code and choose **Reopen in Container** when prompted
+   (or run `Dev Containers: Reopen in Container` from the command palette).
+4. The first build installs everything; later starts are fast.
+5. If dependencies change, run `Dev Containers: Rebuild Container Without Cache`.
 
-**Notes:**
-- If import squiggles appear, use the command palette → `Python: Select Interpreter` → choose `/usr/local/bin/python` (3.12).
-- Place audio files in your local repo's `audio/` folder as these contents will be mirrored to the container. The contents of this folder are included in the .gitignore to avoid large file uploads.
+> If import warnings appear, run `Python: Select Interpreter` → `/usr/local/bin/python`
+> (3.12). Place audio in the local `audio/` folder; it is mirrored into the container and
+> gitignored to avoid committing large files.
 
-## Linting
+## Development
 
-This project uses [ruff](https://docs.astral.sh/ruff/) for linting. A [pre-commit](https://pre-commit.com/) hook runs ruff automatically on every push.
+This project uses [ruff](https://docs.astral.sh/ruff/) for linting, enforced by a
+[pre-commit](https://pre-commit.com/) hook on push, and `pytest` for tests.
 
 ```bash
-# install the pre-push hook (done automatically in the dev container)
+# install the pre-push hook (automatic in the dev container)
 pre-commit install --hook-type pre-push
 
-# run the linter manually
-ruff check .
-
-# auto-fix what ruff can fix
-ruff check --fix .
+ruff check .            # lint
+ruff check --fix .      # auto-fix
+pytest                  # run the test suite
 ```
 
-## Pipeline
+Continuous integration runs via GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
-The agent pipeline is defined in `agents.yaml` and consists of two agents:
+## Acknowledgements
 
-1. **Coordinator** — Greets the user, gathers preferences, retrieves the transcript, delegates to the cleaner, and presents the final result.
-2. **Cleaner** — Cleans and formats the raw transcription (filler-word removal, grammar fixes, punctuation) and generates a bullet-point summary, then returns the result to the coordinator.
-
-Audio transcription is handled by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) running locally (no external API call for transcription). The Whisper model runs on CPU by default (`base.en`, int8 precision).
+This repository is a fork of
+[kennionblack/ai-audio-transcriber](https://github.com/kennionblack/ai-audio-transcriber).
+See the upstream project for original authorship and history.
