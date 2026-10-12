@@ -35,8 +35,7 @@ def parse_language(raw: str) -> str:
     if code not in SUPPORTED_LANGUAGES:
         supported = ", ".join(f"{k} ({v})" for k, v in SUPPORTED_LANGUAGES.items())
         print(
-            f"Error: unsupported language '{code}'\n"
-            f"Supported: {supported}",
+            f"Error: unsupported language '{code}'\nSupported: {supported}",
         )
         sys.exit(1)
 
@@ -59,18 +58,20 @@ async def translate_text(
         f"with no commentary or explanation."
     )
 
-    client = AsyncOpenAI()
+    async with AsyncOpenAI() as client:
+        response = await client.chat.completions.create(
+            # This model seems to do better with translation than gpt-5-mini, which is the default elsewhere
+            model="gpt-5.4-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+        )
 
-    response = await client.chat.completions.create(
-        # This model seems to do better with translation than gpt-5-mini, which is the default elsewhere
-        model="gpt-5.4-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": text},
-        ],
-    )
-
-    return response.choices[0].message.content.strip()
+    content = response.choices[0].message.content if response.choices else None
+    if not content or not content.strip():
+        raise RuntimeError("Translation provider returned an empty response")
+    return content.strip()
 
 
 async def _translate_to_language(
@@ -88,9 +89,7 @@ async def _translate_to_language(
     translated = await translate_text(transcript, lang)
 
     # Concurrently translate each bullet point to avoid api call bottleneck when lots of bullet points are present
-    translated_summary = await asyncio.gather(
-        *(translate_text(bullet, lang) for bullet in summary)
-    )
+    translated_summary = await asyncio.gather(*(translate_text(bullet, lang) for bullet in summary))
 
     ctx = get_context()
     ctx.set_translation(lang, translated)

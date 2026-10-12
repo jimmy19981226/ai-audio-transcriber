@@ -12,9 +12,12 @@ from tools.exporters import write_outputs
 # This allows us to set our own output directory in an env var if desired
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 
+
 def _validate_transcript(value: str) -> list[str] | None:
     # only checking if string is empty here, we can extend this later if we define a more specific transcript format
     errors = []
+    if not isinstance(value, str):
+        return ["transcript must be a string"]
     if not value.strip():
         errors.append("transcript must not be empty")
     return errors or None
@@ -35,6 +38,7 @@ def _validate_summary(bullets: list[str], min_bullets: int, max_bullets: int) ->
     if len(bullets) > max_bullets:
         errors.append(f"summary has {len(bullets)} bullet(s), maximum is {max_bullets}")
     return errors or None
+
 
 @dataclass
 class TranscriptContext:
@@ -96,6 +100,8 @@ class TranscriptContext:
         errors = _validate_summary(bullets, self.min_bullets, self.max_bullets)
         if errors:
             return errors
+        if not self.cleaned_transcript:
+            return ["a cleaned transcript is required before summary export"]
         self.summary = list(bullets)
         print_verbose(f"[context] summary stored ({len(bullets)} bullets)")
         emit_event("summary_ready", summary=list(bullets))
@@ -106,6 +112,8 @@ class TranscriptContext:
         return list(self.summary)
 
     def _on_complete(self) -> None:
+        if not self.cleaned_transcript or not self.summary:
+            raise ValueError("A cleaned transcript and summary are required before export")
         # Write aligned output artifacts with a shared stem.
         try:
             base = Path(self.audio_filename).stem if self.audio_filename else "summary"
@@ -126,8 +134,8 @@ class TranscriptContext:
                 export_files={format_name: str(out_path) for format_name, out_path in artifact_paths.items()},
             )
         except Exception as exc:
-            print_verbose(f"[context] output write failed: {exc}")
-            print(f"[context] output write failed: {exc}")
+            emit_event("pipeline_error", message=f"Output export failed: {exc}")
+            raise RuntimeError(f"Output export failed: {exc}") from exc
 
         if self.on_translation_ready is not None:
             self.on_translation_ready(stem)
@@ -193,10 +201,13 @@ class TranscriptContext:
     def snapshot_json(self) -> str:
         return json.dumps(self.snapshot(), ensure_ascii=False)
 
+
 _instance: TranscriptContext = TranscriptContext()
+
 
 def get_context() -> TranscriptContext:
     return _instance
+
 
 def _reset_context(**kwargs) -> TranscriptContext:
     """Reset singleton with an empty context for testing"""

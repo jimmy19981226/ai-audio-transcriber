@@ -14,21 +14,36 @@ from config import Agent, load_config
 from runtime_events import emit_event
 from tools.context import OUTPUT_DIR, get_context
 from tools.toolbox import ToolBox
-from tools.transcription import load_audio_file
+from tools.transcription import TranscriptionError, load_audio_file
 from tools.translation import SUPPORTED_LANGUAGES, parse_language, run_translation
 
 load_dotenv()
 
 VERBOSE = False
 
+
 def print_verbose(*args, **kwargs):
     """Print only when --verbose flag is set."""
     if VERBOSE:
         print(*args, **kwargs, flush=True)
 
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+client: AsyncOpenAI | None = None
+
+
+def _get_client() -> AsyncOpenAI:
+    """Create a client only when executing a model call, not during import/help."""
+    global client
+    if client is None:
+        if not os.getenv("OPENAI_API_KEY"):
+            raise RuntimeError("Set OPENAI_API_KEY in the environment or .env before running the pipeline")
+        client = AsyncOpenAI()
+    return client
+
+
 tool_box = ToolBox()
 ctx = get_context()
+
 
 def _format_final_package(message: str) -> str | None:
     """Return final user-facing text when `message` is a completed package."""
@@ -76,14 +91,17 @@ def _build_final_payload(result: str) -> dict[str, object]:
         "summary": "",
     }
 
+
 async def get_transcript() -> str:
     """Retrieve the raw transcript. Blocks until transcription is complete, then stores it in the shared context."""
     transcript = await tool_box.get_transcript()
     ctx.set_raw_transcript(transcript)
     return transcript
 
+
 tool_box.tool(get_transcript)
 tools.register_all_tools(tool_box)
+
 
 def add_agent_tools(agents: dict[str, Agent], tool_box: ToolBox):
     def make_agent_tool(agent: Agent):
@@ -111,7 +129,7 @@ def add_agent_tools(agents: dict[str, Agent], tool_box: ToolBox):
         tool_box.tool(make_agent_tool(agent))
 
 
-async def run_agent(agent: Agent, tool_box: ToolBox, message: str | None):
+async def run_agent(agent: Agent, tool_box: ToolBox, message: str | None, *, max_turns: int = 30):
     print_verbose("")
     print_verbose(f"---- RUNNING {agent['name']} ----")
     if message:
@@ -124,12 +142,12 @@ async def run_agent(agent: Agent, tool_box: ToolBox, message: str | None):
 
     tools = tool_box.get_tools(agent["tools"])
 
-    while True:
-        response = await client.responses.create(
+    for _ in range(max_turns):
+        response = await _get_client().responses.create(
             input=history,
             model=agent.get("model", "gpt-5-mini"),
             tools=tools,
-            **agent.get("kwargs", {}),
+            **(agent.get("kwargs") or {}),
         )
 
         history += response.output
@@ -156,6 +174,9 @@ async def run_agent(agent: Agent, tool_box: ToolBox, message: str | None):
             else:
                 print_verbose(item, file=sys.stderr)
 
+    raise RuntimeError(f"Agent {agent['name']!r} exceeded {max_turns} turns without completing")
+
+
 def validate_audio_path(path: Path) -> bool:
     if not path.exists():
         print(f"Error: Path '{path}' does not exist")
@@ -169,11 +190,13 @@ def validate_audio_path(path: Path) -> bool:
         return False
     return True
 
+
 def _run_transcription(audio_path: str) -> str:
     """Wrapper function for transcription that runs on separate thread"""
     transcript = load_audio_file(audio_path)
     print_verbose("---- TRANSCRIPTION COMPLETE ----\n")
     return transcript
+
 
 async def async_main(audio_path: Path, translate_lang: str | None = None, mode: str = "interactive"):
     tool_box.set_audio_path(str(audio_path))
@@ -181,41 +204,50 @@ async def async_main(audio_path: Path, translate_lang: str | None = None, mode: 
 
     # This allows the transcription to run in the background while the agent initializes and calls its own tools.
     # This also allows the user to interact with the coordinator while the transcript is processed concurrently
-    transcription_task = asyncio.create_task(
-        asyncio.to_thread(_run_transcription, str(audio_path))
-    )
+    transcription_task = asyncio.create_task(asyncio.to_thread(_run_transcription, str(audio_path)))
     tool_box.set_transcription_task(transcription_task)
 
     # If we have a translation language specified, set callback for translation
     # Callback invoked in the _on_complete hook in context.py after transcript and summary exist
     translation_task = None
     if translate_lang:
+
         def _start_translation(stem: str):
             nonlocal translation_task
-            translation_task = asyncio.ensure_future(run_translation(
-                language=translate_lang,
-                output_dir=OUTPUT_DIR,
-                stem=stem,
-            ))
+            translation_task = asyncio.ensure_future(
+                run_translation(
+                    language=translate_lang,
+                    output_dir=OUTPUT_DIR,
+                    stem=stem,
+                )
+            )
+
         ctx.on_translation_ready = _start_translation
 
-    config = load_config(Path("agents.yaml"))
+    config = load_config(Path(__file__).with_name("agents.yaml"))
     agents = {agent["name"]: agent for agent in config["agents"]}
     add_agent_tools(agents, tool_box)
     if mode == "auto":
-        main_agent=config.get("automated", config["main"])
+        main_agent = config.get("automated", config["main"])
     else:
-        main_agent=config["main"]
+        main_agent = config["main"]
     result = await run_agent(agents[main_agent], tool_box, None)
-    emit_event("final_result", **_build_final_payload(result))
-
+    # Observe transcription errors even if the model did not request the tool.
+    await transcription_task
     if translation_task:
         await translation_task
+    emit_event("final_result", **_build_final_payload(result))
+
 
 def main(audio_path: Path, translate_lang: str | None = None, mode: str = "interactive"):
     if not validate_audio_path(audio_path):
         sys.exit(1)
-    asyncio.run(async_main(audio_path, translate_lang, mode))
+    try:
+        asyncio.run(async_main(audio_path, translate_lang, mode))
+    except (TranscriptionError, RuntimeError) as exc:
+        emit_event("pipeline_error", message=str(exc))
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
@@ -226,15 +258,14 @@ if __name__ == "__main__":
     parser.add_argument("audio_file_path", type=Path, help="Path to the audio file to process")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging output")
     parser.add_argument(
-        "--translate", "-t",
+        "--translate",
+        "-t",
         metavar="lang_code",
-        help=(
-            "Target language code for translation. "
-            f"Supported: {', '.join(SUPPORTED_LANGUAGES)}"
-        ),
+        help=(f"Target language code for translation. Supported: {', '.join(SUPPORTED_LANGUAGES)}"),
     )
     parser.add_argument(
-        "--mode", "-m",
+        "--mode",
+        "-m",
         choices=["interactive", "auto"],
         default="interactive",
         help="Agent execution mode (default: interactive)",

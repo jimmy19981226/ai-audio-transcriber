@@ -124,6 +124,12 @@ def _handle_event(process: subprocess.Popen, payload: dict) -> None:
         if APP_STATE["process"] is not process:
             return
 
+    if event_type == "pipeline_error":
+        with APP_STATE["lock"]:
+            APP_STATE["status"] = "Failed"
+            APP_STATE["output"] = str(payload.get("message", "Pipeline failed"))
+        return
+
     if event_type == "transcript_ready":
         with APP_STATE["lock"]:
             APP_STATE["transcription_output"] = str(payload.get("transcript", "")).strip()
@@ -191,7 +197,7 @@ def _reader_thread(process: subprocess.Popen) -> None:
                 log_file.flush()
 
             if stripped_line.startswith(EVENT_PREFIX):
-                event_json = stripped_line[len(EVENT_PREFIX):].strip()
+                event_json = stripped_line[len(EVENT_PREFIX) :].strip()
                 try:
                     _handle_event(process, json.loads(event_json))
                 except json.JSONDecodeError:
@@ -206,7 +212,7 @@ def _reader_thread(process: subprocess.Popen) -> None:
     return_code = process.wait()
     with APP_STATE["lock"]:
         APP_STATE["process"] = None
-        if APP_STATE["status"] == "Completed":
+        if return_code == 0 and APP_STATE["status"] == "Completed":
             if not APP_STATE["output"]:
                 APP_STATE["output"] = "\n".join(fallback_output_lines).strip()
             return
@@ -368,11 +374,7 @@ def lookup_text(query: str | None, language_value: str | None) -> str:
                 or APP_STATE["output"]
                 or ""
             )
-            summary = (
-                APP_STATE["translated_summaries"].get(language_code)
-                or APP_STATE["summary_output"]
-                or ""
-            )
+            summary = APP_STATE["translated_summaries"].get(language_code) or APP_STATE["summary_output"] or ""
         else:
             # Search whatever text is currently loaded in the UI state.
             # If we have a cleaned transcript, use it. Otherwise fall back to the final output.
@@ -404,6 +406,7 @@ def clear_all() -> tuple[None, str, str, None, str, str]:
         _reset_session_outputs()
     return None, READY_TEXT, "", None, "", ""
 
+
 CSS = """
 .scroll-box textarea {
     overflow-y: auto !important;
@@ -420,9 +423,7 @@ CSS = """
 }
 """
 
-TRANSLATION_CHOICES = [NO_TRANSLATION_OPTION] + [
-    f"{code} - {name}" for code, name in SUPPORTED_LANGUAGES.items()
-]
+TRANSLATION_CHOICES = [NO_TRANSLATION_OPTION] + [f"{code} - {name}" for code, name in SUPPORTED_LANGUAGES.items()]
 
 
 with gr.Blocks(title="AI Audio Transcriber Demo") as app:
@@ -443,7 +444,7 @@ with gr.Blocks(title="AI Audio Transcriber Demo") as app:
                     label="Output Language",
                     choices=TRANSLATION_CHOICES,
                     value=NO_TRANSLATION_OPTION,
-                    info="Choose this before Transcribe. " \
+                    info="Choose this before Transcribe. "
                     "The selected language replaces the displayed transcript and summary when ready.",
                 )
                 with gr.Row():

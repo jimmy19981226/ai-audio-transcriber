@@ -1,177 +1,156 @@
+<div align="center">
+
 # AI Audio Transcriber
 
-An end-to-end, multi-agent pipeline that turns raw audio — interviews, lectures,
-meetings — into clean transcripts and structured, bullet-point summaries. Drop in an
-audio file and the pipeline transcribes it locally, cleans and summarizes it with a
-team of LLM agents, and exports the result to JSON, DOCX, and PDF, with optional
-translation into ten languages.
+**From interview audio to a transcript, a summary, and shareable documents.**
 
-Run it from the command line or through a drag-and-drop web UI.
+A Python pipeline combining local speech recognition with tool-using LLM agents, a Gradio interface, and optional translation.
 
----
+[![CI](https://github.com/jimmy19981226/ai-audio-transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/jimmy19981226/ai-audio-transcriber/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)
+![Speech](https://img.shields.io/badge/Speech-faster--whisper-6B5B95)
+[![License](https://img.shields.io/badge/License-MIT-2E8B57)](LICENSE)
 
-## How it works
+[Pipeline](#pipeline) · [Quick start](#quick-start) · [Example](#example-workflow) · [Testing](#testing) · [Engineering notes](docs/ENGINEERING.md)
 
+</div>
+
+## Overview
+
+Turning an interview into useful notes involves more than speech recognition. This project separates transcription, cleanup, summary validation, translation, and export into inspectable stages. It can run interactively from a terminal or through a browser interface that tracks pipeline events.
+
+**Provenance:** This repository is a fork of [kennionblack/ai-audio-transcriber](https://github.com/kennionblack/ai-audio-transcriber). Upstream authorship and the MIT license are retained. The code and commit history document the implementation available in this fork; this README does not imply sole authorship of the original system.
+
+| Stage | What happens |
+| :--- | :--- |
+| **Transcribe** | `faster-whisper` runs the `base` model locally on CPU with int8 computation |
+| **Coordinate** | A configurable agent gathers preferences and delegates the cleaning task |
+| **Clean and summarize** | A cleaner agent uses tools to read the transcript and store validated text and summary bullets |
+| **Translate** | An optional language-specific pass translates the transcript and summary |
+| **Export** | JSON, DOCX, and PDF files share an output stem and source metadata |
+
+## Pipeline
+
+```mermaid
+flowchart LR
+    A[Audio file] --> W[Local faster-whisper]
+    W --> C[Shared transcript context]
+    U[CLI or Gradio] --> R[Coordinator agent]
+    R --> L[Cleaner agent]
+    L <--> C
+    C --> V[Validate transcript and summary]
+    V --> E[JSON / DOCX / PDF]
+    V --> T[Optional translation]
+    T --> E
+    C -. runtime events .-> U
 ```
-                ┌──────────────────────────────────────────────────────┐
-   audio file   │  faster-whisper (local, CPU)  ──►  raw transcript     │
-   ───────────► │                                          │            │
-                │                                          ▼            │
-                │   Coordinator agent  ◄────────►  Cleaner agent         │
-                │   (greets, gathers           (cleans, formats,        │
-                │    preferences, delegates)    summarizes)              │
-                └──────────────────────────────────────────│───────────┘
-                                                            ▼
-                              JSON · DOCX · PDF   (+ optional translation)
-```
 
-- **Local transcription.** Audio is transcribed on-device with
-  [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`base` model, int8, CPU) —
-  no audio ever leaves your machine for the speech-to-text step.
-- **Multi-agent cleaning & summarization.** A two-agent system, defined declaratively in
-  [`agents.yaml`](agents.yaml), refines the transcript:
-  - **Coordinator** — the user-facing agent. Greets, gathers preferences (focus areas,
-    number of summary bullets), retrieves the transcript, and delegates.
-  - **Cleaner** — removes filler words, fixes grammar and punctuation, strips timestamps
-    while preserving speaker labels and `[inaudible]` markers, and writes a concise
-    bullet-point summary.
-- **Shared context.** Agents read from and write to a shared context object, so
-  transcription can run in the background and block the cleaner only when its output is
-  actually needed.
-- **Optional translation.** After the transcript and summary are ready, translation runs
-  concurrently and emits a separate set of output files per target language.
-- **Multi-format export.** Every run produces `JSON`, `DOCX`, and `PDF` artifacts in
-  `output/`.
+Speech recognition runs locally. **Transcript cleanup, summarization, and translation send text to OpenAI.** The initial Whisper model download also requires network access. See [data flow and operating limits](docs/ENGINEERING.md) before using sensitive recordings.
 
-## Prerequisites
+## Quick start
 
-- **Python 3.12+**
-- **ffmpeg** — required by the audio libraries (`pydub`, `faster-whisper`)
-  - Linux: `sudo apt install ffmpeg`
-  - macOS: `brew install ffmpeg`
-  - Windows: [download from ffmpeg.org](https://ffmpeg.org/download.html)
-- **OpenAI API key** with access to the models used for cleaning, summarization, and
-  translation.
+### 1. Install and configure
 
-> This project targets a Unix-style terminal (Linux, macOS, WSL). The Dev Container
-> below is the most reliable way to run it on Windows.
-
-## Setup
-
-Secrets are loaded from a `.env` file at the project root:
+Use **Python 3.12+**. The first transcription downloads Whisper weights; later runs can reuse the local cache. FFmpeg is included in the development container for audio tooling.
 
 ```bash
-echo "OPENAI_API_KEY=your_api_key_here" >> .env
+git clone https://github.com/jimmy19981226/ai-audio-transcriber.git
+cd ai-audio-transcriber
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt -r requirements-dev.txt
+cp .env.example .env
 ```
 
-Install dependencies:
+Set `OPENAI_API_KEY` in `.env` to a key with access to the configured models. Agent models and prompts live in [`agents.yaml`](agents.yaml); translation has its model selection in [`tools/translation.py`](tools/translation.py). Model calls may incur provider charges.
+
+### 2. Choose an interface
+
+<table>
+<tr><th>Terminal</th><th>Browser</th></tr>
+<tr>
+<td><code>python agent.py audio/interview.wav</code><br/>Interactive preferences and agent workflow.</td>
+<td><code>python gradio_app.py</code><br/>Open <a href="http://localhost:7860">localhost:7860</a>, upload audio, and start transcription.</td>
+</tr>
+</table>
 
 ```bash
-pip install -r requirements.txt
+# Automatic mode, suitable for a scripted run:
+python agent.py --mode auto audio/interview.wav
+
+# Translate the finished output into Spanish:
+python agent.py --mode auto --translate es audio/interview.wav
+
+# Inspect the CLI without an API key or model download:
+python agent.py --help
 ```
 
-## Usage
+Accepted file extensions: **MP3, WAV, M4A, FLAC**. Translation codes: `en`, `zh`, `fr`, `es`, `de`, `ja`, `ko`, `pt`, `ar`, `ru`. See the PDF character-set limitation below when exporting translations.
 
-### Command line
+## Example workflow
+
+This is an **illustrative input/output example**, not a measured model result:
+
+> **Spoken input:** “Um, let's test the onboarding flow on Friday. Priya will recruit three participants, and I'll prepare the script.”
+>
+> **Cleaned transcript:** “Let's test the onboarding flow on Friday. Priya will recruit three participants, and I'll prepare the script.”
+>
+> **Summary:** Test onboarding on Friday; Priya recruits three participants; the speaker prepares the script.
+
+A run writes aligned files under `output/`:
+
+```text
+output/
+├── interview.json
+├── interview.docx
+├── interview.pdf
+├── interview_es.json       # when Spanish translation is requested
+├── interview_es.docx
+└── interview_es.pdf
+```
+
+Existing output names receive a numeric suffix. JSON contains title, timestamp, source filename, metadata, summary bullets, and transcript lines. The UI consumes structured runtime events and saves per-run logs under `logs/`.
+
+## Engineering highlights
+
+- **Declarative agents.** Prompts, models, and tool availability are defined in YAML, with a Python tool registry producing strict function schemas.
+- **Concurrent transcription.** Speech recognition runs in a background thread; dependent tools await its result.
+- **Explicit failure handling.** Missing, invalid, or silent audio raises a transcription error. Error text cannot be stored as a successful raw transcript.
+- **Bounded agent turns.** Each agent invocation has a turn limit, preventing an endless non-completing response loop within that invocation.
+- **Validated output state.** Transcript types, summary counts, and export ordering are checked before downstream work. Export errors prevent the translation callback from continuing with a failed output package.
+- **Testable interfaces.** Core tests stub model transport and speech decoding, so ordinary test runs require no provider key or Whisper download.
+
+## Testing
 
 ```bash
-python3 agent.py [-h] [-v] [-t LANG_CODE] path/to/audio/file
+python -m pytest -q
+ruff check .
+ruff format --check .
 ```
 
-| Flag | Description |
-|------|-------------|
-| `-h` | Show help and exit |
-| `-v` | Verbose/debug logging for each pipeline step |
-| `-t`  | Translate the output to a target language (see codes below) |
-
-- **Supported audio formats:** `.mp3`, `.wav`, `.m4a`, `.flac`
-- **Supported translation languages:** `en`, `zh`, `fr`, `es`, `de`, `ja`, `ko`, `pt`,
-  `ar`, `ru`. Translation runs concurrently after the transcript and summary are ready
-  and writes a parallel set of output files with a language suffix (e.g. `test_es.json`).
-
-Output files are written to `output/`.
-
-### Web UI (Gradio)
+The optional real Whisper fixture test is enabled separately:
 
 ```bash
-python3 gradio_app.py
+RUN_TRANSCRIPTION_INTEGRATION=1 python -m pytest -q
 ```
 
-Open **http://localhost:7860** to:
+That test may download model weights and take longer on CPU. The normal suite covers agent dispatch, nullable tool schemas, transcription failures, output validation, export failures, and document creation. CI installs runtime dependencies and runs the ordinary tests without a provider credential.
 
-- Upload an audio file via drag-and-drop or file picker
-- Click **Transcribe** to run the full agent pipeline
-- Watch the cleaned transcription and summary stream in as each step completes
+## Code guide
 
-Internally, `gradio_app.py` runs `agent.py` as a subprocess and communicates over a
-structured event protocol ([`runtime_events.py`](runtime_events.py)). The UI auto-replies
-to the coordinator so the pipeline runs hands-free; per-run logs are saved under `logs/`.
+| File | Responsibility |
+| :--- | :--- |
+| [`agent.py`](agent.py) | CLI, background transcription, agent loop, completion events |
+| [`agents.yaml`](agents.yaml) | Coordinator/cleaner prompts, models, and tool permissions |
+| [`tools/toolbox.py`](tools/toolbox.py) | Tool registration, strict schemas, dispatch |
+| [`tools/context.py`](tools/context.py) | Validated shared state and export lifecycle |
+| [`tools/exporters.py`](tools/exporters.py) | JSON, DOCX, and PDF rendering |
+| [`gradio_app.py`](gradio_app.py) / [`runtime_events.py`](runtime_events.py) | Browser UI and subprocess event protocol |
 
-## Project structure
+[`professor_framework/`](professor_framework/) is a separate reference framework retained from the repository's development history. It is not the audio pipeline's entry point.
 
-```
-.
-├── agent.py                 # CLI entry point + agent runtime loop
-├── gradio_app.py            # web UI; drives agent.py as a subprocess
-├── agents.yaml              # declarative definition of the coordinator + cleaner agents
-├── runtime_events.py        # event protocol bridging the UI and the pipeline
-├── config.py                # loads agent config (yaml / json / md)
-├── tools/
-│   ├── transcription.py     # local faster-whisper transcription
-│   ├── translation.py       # concurrent multi-language translation
-│   ├── exporters.py         # JSON / DOCX / PDF output
-│   ├── context.py           # shared transcript context
-│   ├── coordinator_tools.py # tools exposed to the coordinator agent
-│   ├── cleaner_tools.py     # tools exposed to the cleaner agent
-│   └── toolbox.py           # tool registry
-├── tests/                   # pytest suite
-├── audio/                   # input audio (gitignored)
-└── output/                  # generated transcripts & summaries (gitignored)
-```
+## Operating limits
 
-## Running with Docker
+The Gradio application maintains shared process state and is intended for a local, single-user workflow. It does not provide a multi-tenant service boundary. Whisper output can contain recognition errors; LLM cleanup and summaries should be checked against source recordings. The current PDF exporter uses a Latin-1 font with character substitution, so non-Latin translations are best preserved in JSON and DOCX until a Unicode-font renderer is added. No speaker-diarization stage is implemented.
 
-### Docker Compose
-
-```bash
-docker compose up --build
-docker compose exec app bash
-```
-
-Builds from `Dockerfile.dev` and volume-mounts the project, so local edits are reflected
-immediately.
-
-### VS Code Dev Container (recommended for development)
-
-1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/).
-2. Install the [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) extension.
-3. Open the cloned folder in VS Code and choose **Reopen in Container** when prompted
-   (or run `Dev Containers: Reopen in Container` from the command palette).
-4. The first build installs everything; later starts are fast.
-5. If dependencies change, run `Dev Containers: Rebuild Container Without Cache`.
-
-> If import warnings appear, run `Python: Select Interpreter` → `/usr/local/bin/python`
-> (3.12). Place audio in the local `audio/` folder; it is mirrored into the container and
-> gitignored to avoid committing large files.
-
-## Development
-
-This project uses [ruff](https://docs.astral.sh/ruff/) for linting, enforced by a
-[pre-commit](https://pre-commit.com/) hook on push, and `pytest` for tests.
-
-```bash
-# install the pre-push hook (automatic in the dev container)
-pre-commit install --hook-type pre-push
-
-ruff check .            # lint
-ruff check --fix .      # auto-fix
-pytest                  # run the test suite
-```
-
-Continuous integration runs via GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
-
-## Acknowledgements
-
-This repository is a fork of
-[kennionblack/ai-audio-transcriber](https://github.com/kennionblack/ai-audio-transcriber).
-See the upstream project for original authorship and history.
+[Development containers, data flow, and contribution notes →](docs/ENGINEERING.md)

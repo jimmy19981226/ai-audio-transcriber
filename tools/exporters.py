@@ -4,10 +4,10 @@ import json
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from docx import Document
-from fpdf import FPDF
+if TYPE_CHECKING:
+    from fpdf import FPDF
 
 # PDF layout constants. Units are in points (1/72 inch). These can be adjusted as needed
 # for different formatting preferences.
@@ -104,6 +104,8 @@ def _build_export_content(
 # FPDF library with specific layout settings for margins, font sizes, and line heights to ensure
 # a clean and readable output.
 def _write_docx(path: Path, content: dict[str, Any]) -> None:
+    from docx import Document
+
     document = Document()
     document.add_heading(content["title"], level=1)
 
@@ -139,6 +141,8 @@ def _write_docx(path: Path, content: dict[str, Any]) -> None:
 # readability. The function handles cases where certain pieces of information may be unavailable,
 # ensuring that the PDF still provides a clear and organized presentation of the available data.
 def _write_pdf(path: Path, content: dict[str, Any]) -> None:
+    from fpdf import FPDF
+
     pdf = FPDF(format="letter", unit="pt")
     pdf.set_title(content["title"])
     pdf.set_author("ai-audio-transcriber")
@@ -196,9 +200,9 @@ def _pdf_line(pdf: FPDF, text: str) -> None:
     pdf.set_x(pdf.l_margin)
     pdf.multi_cell(w=pdf.epw, h=PDF_LINE_HEIGHT, text=_pdf_safe_text(text))
 
+
 # This function takes a string of text and applies Unicode normalization and character
 # replacements to ensure that the text is compatible with the PDF generation process.
 def _pdf_safe_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", text).translate(PDF_TEXT_REPLACEMENTS)
     return normalized.encode("latin-1", errors="replace").decode("latin-1")
-

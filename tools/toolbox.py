@@ -6,6 +6,7 @@ from typing import Any, Callable, Literal, Union, get_args, get_origin, get_type
 from openai.types.responses import FunctionToolParam
 
 from config import Agent
+from tools.transcription import TranscriptionError
 
 _tools: dict[str, Callable] = {}
 
@@ -23,7 +24,8 @@ def _get_strict_json_schema_type(annotation) -> dict:
     if _is_optional(annotation):
         non_none_args = [arg for arg in args if arg is not type(None)]
         if len(non_none_args) == 1:
-            return _get_strict_json_schema_type(non_none_args[0])
+            schema = _get_strict_json_schema_type(non_none_args[0])
+            return {**schema, "type": [schema["type"], "null"]}
         raise TypeError(f"Unsupported Union with multiple non-None values: {annotation}")
 
     type_map = {
@@ -72,13 +74,8 @@ def generate_function_schema(func: Callable[..., Any]) -> FunctionToolParam:
         "type": "function",
         "name": func.__name__,
         "description": func.__doc__ or "",
-        "parameters": {
-            "type": "object",
-            "properties": params,
-            "required": required,
-            "additionalProperties": False
-        },
-        "strict": True
+        "parameters": {"type": "object", "properties": params, "required": required, "additionalProperties": False},
+        "strict": True,
     }
 
 
@@ -103,29 +100,28 @@ class ToolBox:
     async def get_transcript(self) -> str:
         """Await the background transcription task and return the result."""
         if self._transcription_task is None:
-            return "No transcription task started"
-        try:
-            return await self._transcription_task
-        except Exception as e:
-            return f"Transcription failed: {e}"
+            raise TranscriptionError("No transcription task started")
+        return await self._transcription_task
 
     def tool(self, func):
         self._tools.append(generate_function_schema(func))
 
         if inspect.iscoroutinefunction(func):
+
             async def safe_func(*args, **kwargs):
                 try:
                     return await func(*args, **kwargs)
-                except (KeyboardInterrupt, SystemExit):
+                except (KeyboardInterrupt, SystemExit, RuntimeError):
                     raise
                 except Exception:
                     return traceback.format_exc()
 
         else:
+
             def safe_func(*args, **kwargs):
                 try:
                     return func(*args, **kwargs)
-                except (KeyboardInterrupt, SystemExit):
+                except (KeyboardInterrupt, SystemExit, RuntimeError):
                     raise
                 except Exception:
                     return traceback.format_exc()
@@ -134,7 +130,7 @@ class ToolBox:
         return func
 
     def get_tools(self, tool_names: list[str]):
-        return [tool for tool in self._tools if tool['name'] in set(tool_names)]
+        return [tool for tool in self._tools if tool["name"] in set(tool_names)]
 
     async def run_tool(self, tool_name: str, **kwargs):
         tool = self._funcs.get(tool_name)
@@ -148,7 +144,7 @@ class ToolBox:
         async def function(message: str) -> str:
             return await run_agent(agent, self, message)
 
-        function.__name__ = agent['name']
-        function.__doc__ = agent['description']
+        function.__name__ = agent["name"]
+        function.__doc__ = agent["description"]
 
         self.tool(function)
