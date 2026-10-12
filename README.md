@@ -19,7 +19,7 @@ A Python pipeline combining local speech recognition with tool-using LLM agents,
 
 Turning an interview into useful notes involves more than speech recognition. This project separates transcription, cleanup, summary validation, translation, and export into inspectable stages. It can run interactively from a terminal or through a browser interface that tracks pipeline events.
 
-**Provenance:** This repository is a fork of [kennionblack/ai-audio-transcriber](https://github.com/kennionblack/ai-audio-transcriber). Upstream authorship and the MIT license are retained. The code and commit history document the implementation available in this fork; this README does not imply sole authorship of the original system.
+**Built on [kennionblack/ai-audio-transcriber](https://github.com/kennionblack/ai-audio-transcriber).** This fork strengthens failure handling, bounds agent execution, and adds regression tests for transcription and document exports. Upstream attribution and the MIT license are retained.
 
 | Stage | What happens |
 | :--- | :--- |
@@ -32,7 +32,7 @@ Turning an interview into useful notes involves more than speech recognition. Th
 ## Pipeline
 
 ```mermaid
-flowchart LR
+flowchart TB
     A[Audio file] --> W[Local faster-whisper]
     W --> C[Shared transcript context]
     U[CLI or Gradio] --> R[Coordinator agent]
