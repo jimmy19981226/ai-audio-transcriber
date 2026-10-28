@@ -11,7 +11,7 @@ A Python pipeline combining local speech recognition with tool-using LLM agents,
 ![Speech](https://img.shields.io/badge/Speech-faster--whisper-6B5B95)
 [![License](https://img.shields.io/badge/License-MIT-2E8B57)](LICENSE)
 
-[Pipeline](#pipeline) · [Quick start](#quick-start) · [Example](#example-workflow) · [Testing](#testing) · [Engineering notes](docs/ENGINEERING.md)
+[Review guide](#review-guide) · [Pipeline](#pipeline) · [Quick start](#quick-start) · [Example](#example-workflow) · [Testing](#testing) · [Engineering notes](docs/ENGINEERING.md)
 
 </div>
 
@@ -28,6 +28,20 @@ Turning an interview into useful notes involves more than speech recognition. Th
 | **Clean and summarize** | A cleaner agent uses tools to read the transcript and store validated text and summary bullets |
 | **Translate** | An optional language-specific pass translates the transcript and summary |
 | **Export** | JSON, DOCX, and PDF files share an output stem and source metadata |
+
+## Review guide
+
+This fork's review focus is the boundary between model output and successful application state:
+
+| Failure to inspect | Implemented behavior | Evidence |
+| :--- | :--- | :--- |
+| Audio is missing, silent, or fails to decode | Raise a transcription error instead of passing an error string downstream as transcript text. | [Transcription](tools/transcription.py) · [Regression tests](tests/test_pipeline_reliability.py) |
+| An agent keeps responding without completing | Stop at the invocation's configured turn limit. | [Agent loop](agent.py) · [Bounded-loop test](tests/test_pipeline_reliability.py) |
+| Export fails after a summary is accepted | Propagate the export failure and do not invoke the translation callback. | [Shared state and completion](tools/context.py) · [Export-failure test](tests/test_pipeline_reliability.py) |
+
+For example, the export regression injects a `disk full` error and checks that translation never starts. This verifies failure propagation; it does not claim that partially written files are rolled back.
+
+After installing dependencies, run `python -m pytest tests/test_pipeline_reliability.py -q` to inspect these paths without a provider credential or speech-model download. Follow the [example workflow](#example-workflow) for the user-facing output.
 
 ## Pipeline
 
@@ -113,12 +127,9 @@ Existing output names receive a numeric suffix. JSON contains title, timestamp, 
 
 ## Engineering highlights
 
-- **Declarative agents.** Prompts, models, and tool availability are defined in YAML, with a Python tool registry producing strict function schemas.
-- **Concurrent transcription.** Speech recognition runs in a background thread; dependent tools await its result.
-- **Explicit failure handling.** Missing, invalid, or silent audio raises a transcription error. Error text cannot be stored as a successful raw transcript.
-- **Bounded agent turns.** Each agent invocation has a turn limit, preventing an endless non-completing response loop within that invocation.
-- **Validated output state.** Transcript types, summary counts, and export ordering are checked before downstream work. Export errors prevent the translation callback from continuing with a failed output package.
-- **Testable interfaces.** Core tests stub model transport and speech decoding, so ordinary test runs require no provider key or Whisper download.
+Agent prompts, models, and tool permissions live in YAML. A Python registry builds strict function schemas, while a shared context validates transcript types, summary counts, and export ordering. Speech recognition runs in a background thread; tools that need its output wait for completion.
+
+The CLI and Gradio interface share the pipeline. Structured runtime events expose progress to the browser, and stubbed model transport and speech decoding keep ordinary tests independent of external services. See the [code guide](#code-guide) for the entry points and [operating limits](#operating-limits) for the single-user and export constraints.
 
 ## Testing
 
